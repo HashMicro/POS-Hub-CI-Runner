@@ -38,7 +38,7 @@ function Invoke-WithJavaHome {
   $javaExe = if ($IsLinux -or $IsMacOS) { "bin/java" } else { "bin\java.exe" }
   $javaPath = Join-Path $JavaHome $javaExe
   if (!(Test-Path $javaPath)) {
-    throw "$EnvironmentName must point to a JDK containing $javaExe: $JavaHome"
+    throw "$EnvironmentName must point to a JDK containing ${javaExe}: $JavaHome"
   }
 
   $previousJavaHome = $env:JAVA_HOME
