@@ -483,6 +483,9 @@ function Patch-WindowsCMake {
   $content = $projectRegex.Replace($content, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) return "project($BinaryName$($m.Groups['rest'].Value)" })
   $binaryRegex = [regex]'(?m)^(?<prefix>\s*set\(\s*BINARY_NAME\s+)[^\r\n\)]*\)'
   $content = $binaryRegex.Replace($content, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) return "$($m.Groups['prefix'].Value)`"$BinaryName`")" })
+  if ($content -notmatch '_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS') {
+    $content = "add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)`r`n" + $content
+  }
   Set-FileContent -Path $CMakePath -Content $content
 }
 
@@ -713,6 +716,10 @@ if ($appType -eq 'hmx') {
   Apply-IconAssets -AppDir $appDir
 
   if ($platform -eq 'windows') {
+    if ((Test-Path $windowsCMake) -and ((Get-Content -Path $windowsCMake -Raw) -notmatch '_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS')) {
+      $cmakeRaw = Get-Content -Path $windowsCMake -Raw
+      Set-FileContent -Path $windowsCMake -Content ("add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)`r`n" + $cmakeRaw)
+    }
     Set-InnoDefine -Path $innoSetup -Name "MyAppVersion" -Value $versionFull
   }
 }
@@ -726,6 +733,16 @@ elseif ($appType -eq 'pos_logger') {
 # repo-root layout served by the hub, so both can extract straight into $appDir.
 if ($appType -ne 'hmx') {
   Apply-IconAssets -AppDir $appDir
+}
+
+if ($platform -eq 'windows') {
+  $existingCL = [Environment]::GetEnvironmentVariable('CL')
+  $coroutineFlag = '/D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS'
+  if ([string]::IsNullOrWhiteSpace($existingCL)) {
+    $env:CL = $coroutineFlag
+  } elseif ($existingCL -notmatch '_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS') {
+    $env:CL = "$existingCL $coroutineFlag"
+  }
 }
 
 Push-Location $appDir

@@ -83,6 +83,7 @@ jobs:
     env:
       POSHUB_GIT_CLONE_USERNAME: ${{ secrets.POSHUB_GIT_CLONE_USERNAME || 'oauth2' }}
       POSHUB_GIT_CLONE_TOKEN: ${{ secrets.POSHUB_GIT_CLONE_TOKEN }}
+      CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
 
     steps:
       - name: Checkout CI Runner Repository
