@@ -1,0 +1,351 @@
+# POS Hub -> GitHub Actions (Dedicated CI Runner Repo) Build Workflow
+#
+# Cara pakai di repo khusus CI Runner:
+#   1. Simpan file ini di `.github/workflows/pos-hub-build.yml` pada repository CI runner Anda di GitHub.
+#   2. Tambahkan Repository Secrets di GitHub (Settings -> Secrets and variables -> Actions):
+#      - POSHUB_GIT_CLONE_USERNAME : Username token GitLab (contoh: oauth2)
+#      - POSHUB_GIT_CLONE_TOKEN    : Personal Access Token / Deploy Token untuk clone repo git.hashmicro.com
+#   3. Trigger bisa dilakukan via:
+#      - Tombol Build di POS Hub Dashboard (menggunakan GitHub REST API `workflow_dispatch`)
+#      - Tombol "Run workflow" langsung di tab Actions GitHub (tanpa perlu update code)
+
+name: POS Hub Build Runner (Android & Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        description: "POS Hub Build Job ID (opsional jika manual trigger)"
+        required: false
+        default: ""
+        type: string
+      platform:
+        description: "Target Platform"
+        required: true
+        default: "windows"
+        type: choice
+        options:
+          - windows
+          - android
+      app_type:
+        description: "Tipe Aplikasi POS"
+        required: true
+        default: "hmx"
+        type: choice
+        options:
+          - hmx
+          - pos_logger
+          - capacitor
+      repo_url:
+        description: "Git Repository URL Aplikasi"
+        required: true
+        default: "https://git.hashmicro.com/hashmicro1/hmx/hmx-super-apps"
+        type: string
+      branch:
+        description: "Branch Client (contoh: main atau app/namaclient)"
+        required: true
+        default: "main"
+        type: string
+      target_version:
+        description: "Override Version MAJOR.MINOR.PATCH+BUILD (kosong = ikuti pubspec/package.json)"
+        required: false
+        default: ""
+        type: string
+      target_commit:
+        description: "Commit SHA spesifik (kosong = HEAD dari branch)"
+        required: false
+        default: ""
+        type: string
+      callback_url:
+        description: "POS Hub Status Callback URL"
+        required: false
+        default: ""
+        type: string
+      artifact_url:
+        description: "POS Hub Artifact Upload URL"
+        required: false
+        default: ""
+        type: string
+      payload_b64:
+        description: "Base64 JSON berisi konfigurasi client dari POS Hub (POSHUB_* env vars)"
+        required: false
+        default: ""
+        type: string
+
+  repository_dispatch:
+    types: [pos-hub-build]
+
+jobs:
+  build:
+    name: Build ${{ inputs.platform || github.event.client_payload.platform || 'windows' }} (${{ inputs.branch || github.event.client_payload.branch || 'main' }})
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      POSHUB_GIT_CLONE_USERNAME: ${{ secrets.POSHUB_GIT_CLONE_USERNAME || 'oauth2' }}
+      POSHUB_GIT_CLONE_TOKEN: ${{ secrets.POSHUB_GIT_CLONE_TOKEN }}
+
+    steps:
+      - name: Checkout CI Runner Repository
+        uses: actions/checkout@v4
+
+      - name: Resolve Inputs & Inject POS Hub Environment
+        id: init
+        shell: pwsh
+        env:
+          INPUT_JOB_ID: ${{ inputs.job_id }}
+          INPUT_PLATFORM: ${{ inputs.platform }}
+          INPUT_APP_TYPE: ${{ inputs.app_type }}
+          INPUT_REPO_URL: ${{ inputs.repo_url }}
+          INPUT_BRANCH: ${{ inputs.branch }}
+          INPUT_TARGET_VERSION: ${{ inputs.target_version }}
+          INPUT_TARGET_COMMIT: ${{ inputs.target_commit }}
+          INPUT_CALLBACK_URL: ${{ inputs.callback_url }}
+          INPUT_ARTIFACT_URL: ${{ inputs.artifact_url }}
+          INPUT_PAYLOAD_B64: ${{ inputs.payload_b64 }}
+          DISPATCH_PAYLOAD_JSON: ${{ toJson(github.event.client_payload) }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $workDir = Join-Path $env:RUNNER_TEMP "poshub-job"
+          $artifactDir = Join-Path $workDir "artifacts"
+          $logFile = Join-Path $workDir "build.log"
+          New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
+
+          "POSHUB_WORK_DIR=$workDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POSHUB_ARTIFACT_DIR=$artifactDir" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POSHUB_BUILD_LOG_FILE=$logFile" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+          function Set-EnvVar {
+            param([string]$Key, [string]$Value, [bool]$Secret = $false)
+            if ([string]::IsNullOrWhiteSpace($Key) -or $null -eq $Value) { return }
+            if ($Secret -and ![string]::IsNullOrWhiteSpace($Value)) {
+              Write-Host "::add-mask::$Value"
+            }
+            $delimiter = "EOF_" + [Guid]::NewGuid().ToString("N")
+            "$Key<<$delimiter`n$Value`n$delimiter" | Out-File -FilePath $env:GITHUB_ENV -Append
+            [Environment]::SetEnvironmentVariable($Key, $Value)
+          }
+
+          # 1. Default values from workflow_dispatch inputs
+          Set-EnvVar "POSHUB_JOB_ID" $env:INPUT_JOB_ID
+          Set-EnvVar "POSHUB_PLATFORM" $(if ($env:INPUT_PLATFORM) { $env:INPUT_PLATFORM } else { "windows" })
+          Set-EnvVar "POSHUB_APP_TYPE" $(if ($env:INPUT_APP_TYPE) { $env:INPUT_APP_TYPE } else { "hmx" })
+          Set-EnvVar "POSHUB_REPO_URL" $(if ($env:INPUT_REPO_URL) { $env:INPUT_REPO_URL } else { "https://git.hashmicro.com/hashmicro1/hmx/hmx-super-apps" })
+          Set-EnvVar "POSHUB_BUILD_BRANCH" $(if ($env:INPUT_BRANCH) { $env:INPUT_BRANCH } else { "main" })
+          Set-EnvVar "POSHUB_TARGET_VERSION" $env:INPUT_TARGET_VERSION
+          Set-EnvVar "POSHUB_RELEASE_TO_COMMIT" $env:INPUT_TARGET_COMMIT
+          Set-EnvVar "POS_HUB_CALLBACK_URL" $env:INPUT_CALLBACK_URL
+          Set-EnvVar "POS_HUB_ARTIFACT_URL" $env:INPUT_ARTIFACT_URL
+
+          # 2. Override / enrich from repository_dispatch client_payload if present
+          if (![string]::IsNullOrWhiteSpace($env:DISPATCH_PAYLOAD_JSON) -and $env:DISPATCH_PAYLOAD_JSON -ne "null") {
+            $dispatchObj = $env:DISPATCH_PAYLOAD_JSON | ConvertFrom-Json
+            foreach ($prop in $dispatchObj.PSObject.Properties) {
+              $isSecret = $prop.Name -match "TOKEN|SECRET|PASSWORD"
+              Set-EnvVar $prop.Name ([string]$prop.Value) $isSecret
+            }
+          }
+
+          # 3. Override / enrich from payload_b64 (sent by POS Hub backend via workflow_dispatch)
+          if (![string]::IsNullOrWhiteSpace($env:INPUT_PAYLOAD_B64)) {
+            $jsonBytes = [Convert]::FromBase64String($env:INPUT_PAYLOAD_B64.Trim())
+            $jsonText = [System.Text.Encoding]::UTF8.GetString($jsonBytes)
+            $payloadObj = $jsonText | ConvertFrom-Json
+            foreach ($prop in $payloadObj.PSObject.Properties) {
+              $isSecret = $prop.Name -match "TOKEN|SECRET|PASSWORD"
+              Set-EnvVar $prop.Name ([string]$prop.Value) $isSecret
+            }
+          }
+
+          Write-Host "Initialized build for Platform=$($env:POSHUB_PLATFORM), AppType=$($env:POSHUB_APP_TYPE), Branch=$($env:POSHUB_BUILD_BRANCH)"
+
+      - name: Setup Java 17 (Gradle & Flutter Android Toolchain)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Export JAVA_HOME for POS Hub Build Script
+        shell: pwsh
+        run: |
+          "POSHUB_FLUTTER_JAVA_HOME=$($env:JAVA_HOME)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "POSHUB_CAPACITOR_JAVA_HOME=$($env:JAVA_HOME)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Setup Node.js 20 (Capacitor Apps)
+        if: env.POSHUB_APP_TYPE == 'capacitor'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Setup Dart & FVM (Flutter Apps)
+        if: env.POSHUB_APP_TYPE != 'capacitor'
+        uses: dart-lang/setup-dart@v1
+        with:
+          sdk: stable
+
+      - name: Cache FVM, Pub & Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\fvm
+            ~\AppData\Local\Pub\Cache
+            ~\.gradle\caches
+            ~\.gradle\wrapper
+          key: poshub-${{ runner.os }}-${{ env.POSHUB_PLATFORM }}-${{ env.POSHUB_APP_TYPE }}-v1
+
+      - name: Ensure FVM & Inno Setup Installed
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:POSHUB_APP_TYPE -ne "capacitor") {
+            dart pub global activate fvm
+            $pubBin = Join-Path $env:LOCALAPPDATA "Pub\Cache\bin"
+            $pubBin | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
+          if ($env:POSHUB_PLATFORM -eq "windows") {
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+            if (!(Test-Path $iscc)) {
+              Write-Host "Installing Inno Setup via Chocolatey..."
+              choco install innosetup -y --no-progress
+            }
+          }
+
+      - name: Execute POS Hub Build & Client Patching
+        id: build_step
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # Generate scripts\windows-build.ps1 if not already present in the CI runner repo
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE "scripts\windows-build.ps1"
+          if (!(Test-Path $scriptPath)) {
+            $altPath = Join-Path $env:GITHUB_WORKSPACE "runner-agent\scripts\windows-build.ps1"
+            if (Test-Path $altPath) {
+              $scriptPath = $altPath
+            }
+          }
+
+          if (Test-Path $scriptPath) {
+            Write-Host "Running external script: $scriptPath"
+            & $scriptPath *>&1 | Tee-Object -FilePath $env:POSHUB_BUILD_LOG_FILE
+            if ($LASTEXITCODE -ne 0) {
+              throw "Build script failed with exit code $LASTEXITCODE"
+            }
+          } else {
+            throw "scripts/windows-build.ps1 not found in CI runner repository. Copy runner-agent/scripts/windows-build.ps1 to scripts/windows-build.ps1."
+          }
+
+          # Capture built commit SHA and version
+          $sourceDir = Join-Path $env:POSHUB_WORK_DIR "source"
+          $commitSha = ""
+          if (Test-Path $sourceDir) {
+            $commitSha = (git -C $sourceDir rev-parse HEAD 2>$null).Trim()
+          }
+          $versionFile = Join-Path $env:POSHUB_ARTIFACT_DIR "version.txt"
+          $builtVersion = $env:POSHUB_TARGET_VERSION
+          if (Test-Path $versionFile) {
+            $builtVersion = (Get-Content -Path $versionFile -Raw).Trim()
+          }
+
+          "BUILT_COMMIT_SHA=$commitSha" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "BUILT_VERSION=$builtVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
+          New-Item -Path (Join-Path $env:POSHUB_WORK_DIR "build_succeeded.marker") -ItemType File -Force | Out-Null
+
+      - name: Upload Artifact to GitHub Actions Run (Backup Download)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pos-hub-${{ env.POSHUB_PLATFORM }}-${{ env.BUILT_VERSION || 'artifact' }}
+          path: |
+            ${{ env.POSHUB_ARTIFACT_DIR }}\*.apk
+            ${{ env.POSHUB_ARTIFACT_DIR }}\*.aab
+            ${{ env.POSHUB_ARTIFACT_DIR }}\*.exe
+            ${{ env.POSHUB_ARTIFACT_DIR }}\*.zip
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload Compiled Binary to POS Hub
+        if: success() && env.POS_HUB_ARTIFACT_URL != '' && env.POS_HUB_CALLBACK_TOKEN != ''
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $artifact = Get-ChildItem -Path $env:POSHUB_ARTIFACT_DIR -File |
+            Where-Object { $_.Extension -in @('.apk', '.aab', '.exe', '.zip') } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $artifact) {
+            throw "No compiled artifact (.apk, .exe, .zip) found in $($env:POSHUB_ARTIFACT_DIR)"
+          }
+
+          $notesFile = Join-Path $env:POSHUB_ARTIFACT_DIR "release_notes.md"
+          $changelog = "Generated by POS Hub via GitHub Actions"
+          if (Test-Path $notesFile) {
+            $changelog = Get-Content -Path $notesFile -Raw
+          }
+
+          Write-Host "Uploading $($artifact.Name) (v$($env:BUILT_VERSION)) to POS Hub: $($env:POS_HUB_ARTIFACT_URL)"
+          curl.exe -sS --fail-with-body --retry 3 --retry-delay 5 `
+            -X POST "$($env:POS_HUB_ARTIFACT_URL)" `
+            -H "Authorization: Bearer $($env:POS_HUB_CALLBACK_TOKEN)" `
+            -H "X-POS-Hub-Callback-Token: $($env:POS_HUB_CALLBACK_TOKEN)" `
+            -F "file=@$($artifact.FullName)" `
+            -F "version=$($env:BUILT_VERSION)" `
+            -F "commit_sha=$($env:BUILT_COMMIT_SHA)" `
+            -F "changelog=$changelog"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to upload artifact to POS Hub (exit code $LASTEXITCODE)"
+          }
+
+      - name: Report Build Result to POS Hub Callback
+        if: always()
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:POS_HUB_CALLBACK_URL) -or [string]::IsNullOrWhiteSpace($env:POS_HUB_CALLBACK_TOKEN)) {
+            Write-Host "POS Hub callback URL or token is not set; skipping callback notification."
+            exit 0
+          }
+
+          $marker = Join-Path $env:POSHUB_WORK_DIR "build_succeeded.marker"
+          $jobStatus = "${{ job.status }}"
+          $finalStatus = "failed"
+          $message = "GitHub Actions build failed; check workflow run logs."
+
+          if ($jobStatus -eq "cancelled") {
+            $finalStatus = "cancelled"
+            $message = "GitHub Actions build was cancelled."
+          } elseif (($jobStatus -eq "success") -and (Test-Path $marker)) {
+            $finalStatus = "success"
+            $message = "GitHub Actions build finished successfully."
+          }
+
+          $logTail = ""
+          if ($finalStatus -ne "success" -and ![string]::IsNullOrWhiteSpace($env:POSHUB_BUILD_LOG_FILE) -and (Test-Path $env:POSHUB_BUILD_LOG_FILE)) {
+            $lines = Get-Content -Path $env:POSHUB_BUILD_LOG_FILE -Tail 60 -ErrorAction SilentlyContinue
+            $logTail = ($lines -join "`n")
+            if ($logTail.Length -gt 4000) {
+              $logTail = $logTail.Substring($logTail.Length - 4000)
+            }
+          }
+
+          $runUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
+          $payload = @{
+            status    = $finalStatus
+            version   = [string]$env:BUILT_VERSION
+            commit    = [string]$env:BUILT_COMMIT_SHA
+            build_url = $runUrl
+            message   = $message
+            log       = $logTail
+          } | ConvertTo-Json -Compress
+
+          $payloadPath = Join-Path $env:RUNNER_TEMP "poshub_callback_payload.json"
+          Set-Content -Path $payloadPath -Value $payload -Encoding UTF8 -NoNewline
+
+          Write-Host "Posting status '$finalStatus' to POS Hub callback: $($env:POS_HUB_CALLBACK_URL)"
+          curl.exe -sS --fail-with-body --retry 3 --retry-delay 5 `
+            -X POST "$($env:POS_HUB_CALLBACK_URL)" `
+            -H "Authorization: Bearer $($env:POS_HUB_CALLBACK_TOKEN)" `
+            -H "X-POS-Hub-Callback-Token: $($env:POS_HUB_CALLBACK_TOKEN)" `
+            -H "Content-Type: application/json" `
+            --data-binary "@$payloadPath"
