@@ -78,7 +78,7 @@ on:
 jobs:
   build:
     name: Build ${{ inputs.platform || github.event.client_payload.platform || 'windows' }} (${{ inputs.branch || github.event.client_payload.branch || 'main' }})
-    runs-on: ${{ (inputs.platform || github.event.client_payload.platform || 'windows') == 'android' && 'ubuntu-latest' || 'windows-latest' }}
+    runs-on: ${{ (inputs.platform || github.event.client_payload.platform || 'windows') == 'android' && 'ubuntu-latest' || 'windows-2022' }}
     timeout-minutes: 60
     env:
       POSHUB_GIT_CLONE_USERNAME: ${{ secrets.POSHUB_GIT_CLONE_USERNAME || 'oauth2' }}
