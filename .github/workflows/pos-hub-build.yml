@@ -89,6 +89,21 @@ jobs:
       - name: Checkout CI Runner Repository
         uses: actions/checkout@v4
 
+      - name: Free Up Disk Space (Linux Runner)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          echo "Disk space before cleanup:"
+          df -h /
+          sudo rm -rf /usr/share/dotnet \
+                      /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL \
+                      /usr/local/share/boost \
+                      /usr/share/swift \
+                      /usr/local/lib/node_modules
+          echo "Disk space after cleanup:"
+          df -h /
+
       - name: Resolve Inputs & Inject POS Hub Environment
         id: init
         shell: pwsh
@@ -258,19 +273,6 @@ jobs:
           "BUILT_COMMIT_SHA=$commitSha" | Out-File -FilePath $env:GITHUB_ENV -Append
           "BUILT_VERSION=$builtVersion" | Out-File -FilePath $env:GITHUB_ENV -Append
           New-Item -Path (Join-Path $env:POSHUB_WORK_DIR "build_succeeded.marker") -ItemType File -Force | Out-Null
-
-      - name: Upload Artifact to GitHub Actions Run (Backup Download)
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pos-hub-${{ env.POSHUB_PLATFORM }}-${{ env.BUILT_VERSION || 'artifact' }}
-          path: |
-            ${{ env.POSHUB_ARTIFACT_DIR }}/*.apk
-            ${{ env.POSHUB_ARTIFACT_DIR }}/*.aab
-            ${{ env.POSHUB_ARTIFACT_DIR }}/*.exe
-            ${{ env.POSHUB_ARTIFACT_DIR }}/*.zip
-          if-no-files-found: warn
-          retention-days: 7
 
       - name: Upload Compiled Binary to POS Hub
         if: success() && env.POS_HUB_ARTIFACT_URL != '' && env.POS_HUB_CALLBACK_TOKEN != ''
