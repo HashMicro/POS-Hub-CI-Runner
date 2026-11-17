@@ -10,6 +10,7 @@
 #      - Tombol "Run workflow" langsung di tab Actions GitHub (tanpa perlu update code)
 
 name: POS Hub Build Runner (Android & Windows)
+run-name: Build ${{ inputs.platform || github.event.client_payload.platform || 'windows' }} (${{ inputs.branch || github.event.client_payload.branch || 'main' }}) [${{ inputs.job_id || github.event.client_payload.POSHUB_JOB_ID || 'manual' }}]
 
 on:
   workflow_dispatch:
@@ -178,6 +179,24 @@ jobs:
           }
 
           Write-Host "Initialized build for Platform=$($env:POSHUB_PLATFORM), AppType=$($env:POSHUB_APP_TYPE), Branch=$($env:POSHUB_BUILD_BRANCH)"
+
+          # 4. Notify POS Hub immediately with the active GitHub Actions Run ID & URL so Stop/Cancel works in real-time
+          if (![string]::IsNullOrWhiteSpace($env:POS_HUB_CALLBACK_URL) -and ![string]::IsNullOrWhiteSpace($env:POS_HUB_CALLBACK_TOKEN)) {
+            $runUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
+            $startPayload = @{
+              status    = "running"
+              build_url = $runUrl
+              message   = "GitHub Actions runner started (run #$($env:GITHUB_RUN_ID))"
+            } | ConvertTo-Json -Compress
+            $startPayloadPath = Join-Path $env:RUNNER_TEMP "poshub_start_payload.json"
+            Set-Content -Path $startPayloadPath -Value $startPayload -Encoding UTF8 -NoNewline
+            $curlBin = if ($IsLinux -or $IsMacOS) { "curl" } else { "curl.exe" }
+            & $curlBin -sS --max-time 15 -X POST "$($env:POS_HUB_CALLBACK_URL)" `
+              -H "Authorization: Bearer $($env:POS_HUB_CALLBACK_TOKEN)" `
+              -H "X-POS-Hub-Callback-Token: $($env:POS_HUB_CALLBACK_TOKEN)" `
+              -H "Content-Type: application/json" `
+              --data-binary "@$startPayloadPath" | Out-Null
+          }
 
       - name: Setup Java 17 & 21 (Flutter & Capacitor Android Toolchain)
         uses: actions/setup-java@v4
