@@ -85,6 +85,7 @@ jobs:
       POSHUB_GIT_CLONE_USERNAME: ${{ secrets.POSHUB_GIT_CLONE_USERNAME || 'oauth2' }}
       POSHUB_GIT_CLONE_TOKEN: ${{ secrets.POSHUB_GIT_CLONE_TOKEN }}
       CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
+      GRADLE_OPTS: -Dorg.gradle.daemon=false
 
     steps:
       - name: Checkout CI Runner Repository
@@ -101,7 +102,13 @@ jobs:
                       /opt/hostedtoolcache/CodeQL \
                       /usr/local/share/boost \
                       /usr/share/swift \
-                      /usr/local/lib/node_modules
+                      /usr/local/lib/node_modules \
+                      /usr/local/aws-cli \
+                      /usr/local/aws-sam-cli \
+                      /usr/local/graalvm \
+                      /usr/local/julia* \
+                      /opt/google/chrome \
+                      /usr/local/share/chromium
           echo "Disk space after cleanup:"
           df -h /
 
@@ -269,9 +276,16 @@ jobs:
 
           if (Test-Path $scriptPath) {
             Write-Host "Running external script: $scriptPath"
-            & $scriptPath *>&1 | Tee-Object -FilePath $env:POSHUB_BUILD_LOG_FILE
-            if ($LASTEXITCODE -ne 0) {
-              throw "Build script failed with exit code $LASTEXITCODE"
+            try {
+              & $scriptPath *>&1 | Tee-Object -FilePath $env:POSHUB_BUILD_LOG_FILE
+              $buildExit = $LASTEXITCODE
+              if ($buildExit -ne 0) {
+                throw "Build script failed with exit code $buildExit"
+              }
+            } finally {
+              if ($IsLinux -or $IsMacOS) {
+                try { & pkill -f "GradleDaemon|KotlinCompileDaemon" 2>$null } catch {}
+              }
             }
           } else {
             throw "scripts/windows-build.ps1 not found in CI runner repository. Copy runner-agent/scripts/windows-build.ps1 to scripts/windows-build.ps1."

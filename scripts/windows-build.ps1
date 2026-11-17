@@ -466,6 +466,44 @@ function Patch-AndroidPackage {
   }
 }
 
+function Patch-AndroidGradleProperties {
+  param([string]$AppDir)
+  $propsPath = Join-Path $AppDir "android/gradle.properties"
+  $androidDir = Join-Path $AppDir "android"
+  if (!(Test-Path $androidDir)) { return }
+  $values = [ordered]@{
+    "org.gradle.daemon"         = "false"
+    "org.gradle.workers.max"    = "2"
+    "org.gradle.jvmargs"        = "-Xmx3072m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8"
+    "kotlin.daemon.jvm.options" = "-Xmx1536m"
+  }
+  $lines = New-Object System.Collections.Generic.List[string]
+  $seen = @{}
+  if (Test-Path $propsPath) {
+    foreach ($line in (Get-Content -Path $propsPath)) {
+      $trimmed = $line.Trim()
+      $matched = $false
+      foreach ($key in $values.Keys) {
+        if ($trimmed.StartsWith("$key=")) {
+          $lines.Add("$key=$($values[$key])")
+          $seen[$key] = $true
+          $matched = $true
+          break
+        }
+      }
+      if (-not $matched) {
+        $lines.Add($line)
+      }
+    }
+  }
+  foreach ($key in $values.Keys) {
+    if (-not $seen.ContainsKey($key)) {
+      $lines.Add("$key=$($values[$key])")
+    }
+  }
+  Set-Content -Path $propsPath -Value ($lines -join "`n") -Encoding UTF8
+}
+
 function Get-WindowsBinaryName {
   param([string]$PackageName, [string]$AppName)
   $candidate = (($PackageName -split '\.') | Select-Object -Last 1)
@@ -743,6 +781,11 @@ if ($platform -eq 'windows') {
   } elseif ($existingCL -notmatch '_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS') {
     $env:CL = "$existingCL $coroutineFlag"
   }
+}
+
+if ($platform -eq 'android') {
+  Patch-AndroidGradleProperties -AppDir $appDir
+  $env:GRADLE_OPTS = "-Dorg.gradle.daemon=false"
 }
 
 Push-Location $appDir
