@@ -78,7 +78,7 @@ on:
 jobs:
   build:
     name: Build ${{ inputs.platform || github.event.client_payload.platform || 'windows' }} (${{ inputs.branch || github.event.client_payload.branch || 'main' }})
-    runs-on: windows-latest
+    runs-on: ${{ (inputs.platform || github.event.client_payload.platform || 'windows') == 'android' && 'ubuntu-latest' || 'windows-latest' }}
     timeout-minutes: 60
     env:
       POSHUB_GIT_CLONE_USERNAME: ${{ secrets.POSHUB_GIT_CLONE_USERNAME || 'oauth2' }}
@@ -194,10 +194,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~\fvm
-            ~\AppData\Local\Pub\Cache
-            ~\.gradle\caches
-            ~\.gradle\wrapper
+            ~/fvm
+            ~/.pub-cache
+            ~/AppData/Local/Pub/Cache
+            ~/.gradle/caches
+            ~/.gradle/wrapper
           key: poshub-${{ runner.os }}-${{ env.POSHUB_PLATFORM }}-${{ env.POSHUB_APP_TYPE }}-v1
 
       - name: Ensure FVM & Inno Setup Installed
@@ -206,7 +207,7 @@ jobs:
           $ErrorActionPreference = "Stop"
           if ($env:POSHUB_APP_TYPE -ne "capacitor") {
             dart pub global activate fvm
-            $pubBin = Join-Path $env:LOCALAPPDATA "Pub\Cache\bin"
+            $pubBin = if ($IsLinux -or $IsMacOS) { Join-Path $env:HOME ".pub-cache/bin" } else { Join-Path $env:LOCALAPPDATA "Pub\Cache\bin" }
             $pubBin | Out-File -FilePath $env:GITHUB_PATH -Append
           }
           if ($env:POSHUB_PLATFORM -eq "windows") {
@@ -223,10 +224,9 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
 
-          # Generate scripts\windows-build.ps1 if not already present in the CI runner repo
-          $scriptPath = Join-Path $env:GITHUB_WORKSPACE "scripts\windows-build.ps1"
+          $scriptPath = Join-Path $env:GITHUB_WORKSPACE "scripts/windows-build.ps1"
           if (!(Test-Path $scriptPath)) {
-            $altPath = Join-Path $env:GITHUB_WORKSPACE "runner-agent\scripts\windows-build.ps1"
+            $altPath = Join-Path $env:GITHUB_WORKSPACE "runner-agent/scripts/windows-build.ps1"
             if (Test-Path $altPath) {
               $scriptPath = $altPath
             }
@@ -264,10 +264,10 @@ jobs:
         with:
           name: pos-hub-${{ env.POSHUB_PLATFORM }}-${{ env.BUILT_VERSION || 'artifact' }}
           path: |
-            ${{ env.POSHUB_ARTIFACT_DIR }}\*.apk
-            ${{ env.POSHUB_ARTIFACT_DIR }}\*.aab
-            ${{ env.POSHUB_ARTIFACT_DIR }}\*.exe
-            ${{ env.POSHUB_ARTIFACT_DIR }}\*.zip
+            ${{ env.POSHUB_ARTIFACT_DIR }}/*.apk
+            ${{ env.POSHUB_ARTIFACT_DIR }}/*.aab
+            ${{ env.POSHUB_ARTIFACT_DIR }}/*.exe
+            ${{ env.POSHUB_ARTIFACT_DIR }}/*.zip
           if-no-files-found: warn
           retention-days: 7
 
@@ -291,8 +291,9 @@ jobs:
             $changelog = Get-Content -Path $notesFile -Raw
           }
 
+          $curlBin = if ($IsLinux -or $IsMacOS) { "curl" } else { "curl.exe" }
           Write-Host "Uploading $($artifact.Name) (v$($env:BUILT_VERSION)) to POS Hub: $($env:POS_HUB_ARTIFACT_URL)"
-          curl.exe -sS --fail-with-body --retry 3 --retry-delay 5 `
+          & $curlBin -sS --fail-with-body --retry 3 --retry-delay 5 `
             -X POST "$($env:POS_HUB_ARTIFACT_URL)" `
             -H "Authorization: Bearer $($env:POS_HUB_CALLBACK_TOKEN)" `
             -H "X-POS-Hub-Callback-Token: $($env:POS_HUB_CALLBACK_TOKEN)" `
@@ -349,8 +350,9 @@ jobs:
           $payloadPath = Join-Path $env:RUNNER_TEMP "poshub_callback_payload.json"
           Set-Content -Path $payloadPath -Value $payload -Encoding UTF8 -NoNewline
 
+          $curlBin = if ($IsLinux -or $IsMacOS) { "curl" } else { "curl.exe" }
           Write-Host "Posting status '$finalStatus' to POS Hub callback: $($env:POS_HUB_CALLBACK_URL)"
-          curl.exe -sS --fail-with-body --retry 3 --retry-delay 5 `
+          & $curlBin -sS --fail-with-body --retry 3 --retry-delay 5 `
             -X POST "$($env:POS_HUB_CALLBACK_URL)" `
             -H "Authorization: Bearer $($env:POS_HUB_CALLBACK_TOKEN)" `
             -H "X-POS-Hub-Callback-Token: $($env:POS_HUB_CALLBACK_TOKEN)" `

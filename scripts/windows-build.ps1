@@ -35,16 +35,18 @@ function Invoke-WithJavaHome {
     return
   }
 
-  $javaPath = Join-Path $JavaHome "bin\java.exe"
+  $javaExe = if ($IsLinux -or $IsMacOS) { "bin/java" } else { "bin\java.exe" }
+  $javaPath = Join-Path $JavaHome $javaExe
   if (!(Test-Path $javaPath)) {
-    throw "$EnvironmentName must point to a JDK containing bin\java.exe: $JavaHome"
+    throw "$EnvironmentName must point to a JDK containing $javaExe: $JavaHome"
   }
 
   $previousJavaHome = $env:JAVA_HOME
-  $previousPath = $env:Path
+  $previousPath = $env:PATH
+  $pathSep = [System.IO.Path]::PathSeparator
   try {
     $env:JAVA_HOME = $JavaHome
-    $env:Path = (Join-Path $JavaHome "bin") + ";" + $previousPath
+    $env:PATH = (Join-Path $JavaHome "bin") + $pathSep + $previousPath
     & $Action
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
@@ -58,7 +60,7 @@ function Invoke-WithJavaHome {
     else {
       $env:JAVA_HOME = $previousJavaHome
     }
-    $env:Path = $previousPath
+    $env:PATH = $previousPath
   }
 }
 
@@ -77,7 +79,11 @@ function Invoke-CapacitorGradleRelease {
   param([string]$AppDir)
 
   $capacitorJavaHome = Require-Env 'POSHUB_CAPACITOR_JAVA_HOME'
-  $gradlePath = Join-Path $AppDir "android\gradlew.bat"
+  $gradleWrapper = if ($IsLinux -or $IsMacOS) { "android/gradlew" } else { "android\gradlew.bat" }
+  $gradlePath = Join-Path $AppDir $gradleWrapper
+  if (($IsLinux -or $IsMacOS) -and (Test-Path $gradlePath)) {
+    & chmod +x $gradlePath
+  }
   $gradleWorkDir = Join-Path $AppDir "android"
   Invoke-WithJavaHome `
     -JavaHome $capacitorJavaHome `
@@ -608,10 +614,10 @@ $appType = (Get-OptionalEnv 'POSHUB_APP_TYPE' 'hmx').Trim().ToLowerInvariant()
 if ($appType -ne 'hmx' -and $appType -ne 'pos_logger' -and $appType -ne 'capacitor') {
   throw "unsupported POSHUB_APP_TYPE '$appType'"
 }
-$appDirDefault = 'apps\pos'
+$appDirDefault = 'apps/pos'
 if ($appType -eq 'pos_logger') { $appDirDefault = 'pos_cache' }
 if ($appType -eq 'capacitor') { $appDirDefault = '' }
-$appDirRelative = Get-OptionalEnv 'POSHUB_APP_DIR' $appDirDefault
+$appDirRelative = (Get-OptionalEnv 'POSHUB_APP_DIR' $appDirDefault) -replace '\\', '/'
 $appDir = $sourceDir
 if (![string]::IsNullOrWhiteSpace($appDirRelative)) {
   $appDir = Join-Path $sourceDir $appDirRelative
@@ -625,17 +631,17 @@ $appName = Get-OptionalEnv 'POSHUB_APP_NAME' (Get-OptionalEnv 'POSHUB_CLIENT_NAM
 $packageName = Get-OptionalEnv 'POSHUB_PACKAGE_NAME' ''
 $pubspec = Join-Path $appDir "pubspec.yaml"
 $innoSetup = Join-Path $appDir "inno_setup.iss"
-$mainDart = Join-Path $appDir "lib\main.dart"
-$androidGradle = Join-Path $appDir "android\app\build.gradle.kts"
-$windowsCMake = Join-Path $appDir "windows\CMakeLists.txt"
-$windowsResource = Join-Path $appDir "windows\runner\Runner.rc"
-$windowsMainCpp = Join-Path $appDir "windows\runner\main.cpp"
+$mainDart = Join-Path $appDir "lib/main.dart"
+$androidGradle = Join-Path $appDir "android/app/build.gradle.kts"
+$windowsCMake = Join-Path $appDir "windows/CMakeLists.txt"
+$windowsResource = Join-Path $appDir "windows/runner/Runner.rc"
+$windowsMainCpp = Join-Path $appDir "windows/runner/main.cpp"
 $safeAppName = ConvertTo-SafeName $appName "POS"
 $safeFileName = ConvertTo-SafeFileName $appName "pos"
 $windowsBinaryName = Get-WindowsBinaryName -PackageName $packageName -AppName $appName
-$windowsAppId = ConvertTo-StableAppId $packageName
 $skipAppNamePatch = Test-SkipAppNamePatch
 $platform = (Get-OptionalEnv 'POSHUB_PLATFORM' 'windows').Trim().ToLowerInvariant()
+$windowsAppId = if ($platform -eq 'windows' -or ![string]::IsNullOrWhiteSpace($packageName)) { ConvertTo-StableAppId $packageName } else { "" }
 
 if (Test-Path $sourceDir) {
   Remove-Item -Recurse -Force $sourceDir
@@ -661,7 +667,7 @@ if ([string]::IsNullOrWhiteSpace($versionFull)) {
     $packageJson = Get-Content -Raw -Path $packageJsonPath | ConvertFrom-Json
     $versionFull = Normalize-BuildVersion $packageJson.version
     if ($versionFull -notmatch '\+[0-9]+$') {
-      $capGradleInit = Join-Path $appDir "android\app\build.gradle"
+      $capGradleInit = Join-Path $appDir "android/app/build.gradle"
       if (Test-Path $capGradleInit) {
         $gradleRaw = Get-Content -Raw -Path $capGradleInit
         if ($gradleRaw -match '(?m)versionCode\s*=?\s*(\d+)') {
@@ -761,7 +767,7 @@ try {
     }
     if ($versionCode -le 0) { $versionCode = 1 }
 
-    $capGradle = Join-Path $appDir "android\app\build.gradle"
+    $capGradle = Join-Path $appDir "android/app/build.gradle"
     if (Test-Path $capGradle) {
       $capGradleContent = Get-Content -Path $capGradle -Raw
       if (![string]::IsNullOrWhiteSpace($packageName)) {
@@ -773,7 +779,7 @@ try {
       Set-Content -Path $capGradle -Value $capGradleContent -NoNewline
     }
     if (![string]::IsNullOrWhiteSpace($packageName)) {
-      $javaFiles = Get-ChildItem -Path (Join-Path $appDir "android\app\src\main\java") -Recurse -Filter "*.java" -ErrorAction SilentlyContinue
+      $javaFiles = Get-ChildItem -Path (Join-Path $appDir "android/app/src/main/java") -Recurse -Filter "*.java" -ErrorAction SilentlyContinue
       foreach ($jf in $javaFiles) {
         $jc = Get-Content -Path $jf.FullName -Raw
         if ($jc -match '(?m)^\s*package\s+[^;]+;') {
@@ -782,7 +788,7 @@ try {
         }
       }
     }
-    $capStrings = Join-Path $appDir "android\app\src\main\res\values\strings.xml"
+    $capStrings = Join-Path $appDir "android/app/src/main/res/values/strings.xml"
     if (Test-Path $capStrings) {
       $capStringsContent = Get-Content -Path $capStrings -Raw
       if (![string]::IsNullOrWhiteSpace($appName)) {
@@ -795,14 +801,14 @@ try {
       }
       Set-Content -Path $capStrings -Value $capStringsContent -NoNewline
     }
-    $capPbx = Join-Path $appDir "ios\App\App.xcodeproj\project.pbxproj"
+    $capPbx = Join-Path $appDir "ios/App/App.xcodeproj/project.pbxproj"
     if (Test-Path $capPbx) {
       $capPbxContent = Get-Content -Path $capPbx -Raw
       $capPbxContent = [regex]::Replace($capPbxContent, '(?m)(CURRENT_PROJECT_VERSION\s*=\s*)[^;]+;', ('${1}' + $versionCode + ';'))
       $capPbxContent = [regex]::Replace($capPbxContent, '(?m)(MARKETING_VERSION\s*=\s*)[^;]+;', ('${1}' + $versionBase + ';'))
       Set-Content -Path $capPbx -Value $capPbxContent -NoNewline
     }
-    $poshubConfigPath = Join-Path $appDir "www\poshub-config.js"
+    $poshubConfigPath = Join-Path $appDir "www/poshub-config.js"
     if (Test-Path $poshubConfigPath) {
       $poshubConfig = Get-Content -Path $poshubConfigPath -Raw
       foreach ($capEntry in @(
@@ -829,7 +835,7 @@ try {
     npx cap sync android
     if ($LASTEXITCODE -ne 0) { throw "npx cap sync android failed with exit code $LASTEXITCODE" }
     Invoke-CapacitorGradleRelease -AppDir $appDir
-    $apk = Get-ChildItem -Path (Join-Path $appDir "android\app\build\outputs") -Recurse -Filter "*.apk" |
+    $apk = Get-ChildItem -Path (Join-Path $appDir "android/app/build/outputs") -Recurse -Filter "*.apk" |
       Where-Object { $_.Name -match "release" } |
       Select-Object -First 1
     if (!$apk) {
@@ -842,7 +848,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($packageName)) { throw 'POSHUB_PACKAGE_NAME is required for pos_logger builds' }
     $hubToken = Get-OptionalEnv 'POSHUB_TOKEN' ''
     if ([string]::IsNullOrWhiteSpace($hubToken)) { throw 'POSHUB_TOKEN is required for pos_logger builds' }
-    $appConfigPath = Join-Path $appDir "lib\constants\app_config.dart"
+    $appConfigPath = Join-Path $appDir "lib/constants/app_config.dart"
     $appConfig = Get-Content -Path $appConfigPath -Raw
     foreach ($entry in @(
         @('serverUrl', (Get-OptionalEnv 'POSHUB_BASE_URL' '')),
@@ -857,12 +863,12 @@ try {
       $appConfig = [regex]::Replace($appConfig, $appConfigPattern, ('$1' + $sq + $entry[1] + $sq))
     }
     Set-Content -Path $appConfigPath -Value $appConfig -NoNewline
-    $loggerGradle = Join-Path $appDir "android\app\build.gradle"
+    $loggerGradle = Join-Path $appDir "android/app/build.gradle"
     $loggerGradleContent = Get-Content -Path $loggerGradle -Raw
     $loggerGradleContent = [regex]::Replace($loggerGradleContent, '(?m)(namespace\s*["''])[^"'']+([''"])', ('$1' + $packageName + '$2'))
     $loggerGradleContent = [regex]::Replace($loggerGradleContent, 'applicationId\s+"[^"]+"', 'applicationId "' + $packageName + '"')
     Set-Content -Path $loggerGradle -Value $loggerGradleContent -NoNewline
-    $loggerAppNamesPath = Join-Path $appDir "lib\constants\app_names.dart"
+    $loggerAppNamesPath = Join-Path $appDir "lib/constants/app_names.dart"
     if ((Test-Path $loggerAppNamesPath) -and ![string]::IsNullOrWhiteSpace($appName)) {
       $loggerAppNames = Get-Content -Path $loggerAppNamesPath -Raw
       $sq = [string][char]39
@@ -879,7 +885,7 @@ try {
       }
       Set-Content -Path $loggerPubspecPath -Value $loggerPubspec -NoNewline
     }
-    $loggerAndroidMainDir = Join-Path $appDir "android\app\src\main"
+    $loggerAndroidMainDir = Join-Path $appDir "android/app/src/main"
     if (Test-Path $loggerAndroidMainDir) {
       Get-ChildItem -Path $loggerAndroidMainDir -Recurse -File | Where-Object { $_.Name -in @('MainActivity.kt', 'MainActivity.java') } | ForEach-Object {
         $actContent = Get-Content -Path $_.FullName -Raw
@@ -887,7 +893,7 @@ try {
         Set-Content -Path $_.FullName -Value $actContent -NoNewline
       }
     }
-    $loggerManifest = Join-Path $appDir "android\app\src\main\AndroidManifest.xml"
+    $loggerManifest = Join-Path $appDir "android/app/src/main/AndroidManifest.xml"
     if (Test-Path $loggerManifest) {
       $loggerManifestContent = Get-Content -Path $loggerManifest -Raw
       $loggerManifestContent = [regex]::Replace($loggerManifestContent, '(<application[^>]*android:label=")[^"]*(")', ('$1' + $appName + '$2'))
@@ -896,15 +902,15 @@ try {
     if ($platform -eq 'windows') {
       $loggerBinaryName = ($packageName.Split('.')[-1] -replace '[^a-z0-9_-]', '_').ToLower().Trim('-_')
       if ([string]::IsNullOrWhiteSpace($loggerBinaryName)) { $loggerBinaryName = 'pos' }
-      Patch-WindowsCMake -CMakePath (Join-Path $appDir "windows\CMakeLists.txt") -BinaryName $loggerBinaryName
-      Patch-WindowsMetadata -ResourcePath (Join-Path $appDir "windows\runner\Runner.rc") -AppName $appName -BinaryName $loggerBinaryName
-      Patch-WindowsWindowTitle -MainCppPath (Join-Path $appDir "windows\runner\main.cpp") -AppName $appName
+      Patch-WindowsCMake -CMakePath (Join-Path $appDir "windows/CMakeLists.txt") -BinaryName $loggerBinaryName
+      Patch-WindowsMetadata -ResourcePath (Join-Path $appDir "windows/runner/Runner.rc") -AppName $appName -BinaryName $loggerBinaryName
+      Patch-WindowsWindowTitle -MainCppPath (Join-Path $appDir "windows/runner/main.cpp") -AppName $appName
     }
     Invoke-FlutterCommand -Arguments @('install')
     Invoke-FlutterCommand -Arguments @('flutter', 'pub', 'get')
     if ($platform -eq 'android') {
       Invoke-FlutterCommand -Arguments @('flutter', 'build', 'apk', '--release')
-      $apk = Join-Path $appDir "build\app\outputs\flutter-apk\app-release.apk"
+      $apk = Join-Path $appDir "build/app/outputs/flutter-apk/app-release.apk"
       if (!(Test-Path $apk)) {
         throw "No APK found at $apk after flutter build apk"
       }
@@ -913,7 +919,7 @@ try {
     }
     elseif ($platform -eq 'windows') {
       Invoke-FlutterCommand -Arguments @('flutter', 'build', 'windows', '--release')
-      $releaseDir = Join-Path $appDir "build\windows\x64\runner\Release"
+      $releaseDir = Join-Path $appDir "build/windows/x64/runner/Release"
       if (!(Test-Path $releaseDir)) {
         throw "No Windows Release bundle found at $releaseDir after flutter build windows"
       }
@@ -929,7 +935,7 @@ try {
   Invoke-FlutterCommand -Arguments @('flutter', 'pub', 'get')
   if ($platform -eq 'android') {
     Invoke-FlutterCommand -Arguments @('flutter', 'build', 'apk', '--release')
-    $apk = Join-Path $appDir "build\app\outputs\flutter-apk\app-release.apk"
+    $apk = Join-Path $appDir "build/app/outputs/flutter-apk/app-release.apk"
     if (!(Test-Path $apk)) {
       throw "No APK found at $apk after flutter build apk"
     }
