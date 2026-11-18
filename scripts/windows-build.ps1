@@ -156,6 +156,10 @@ function Invoke-GitClone {
     if ([string]::IsNullOrWhiteSpace($cloneUser)) { $cloneUser = 'oauth2' }
     $clonePair = "$cloneUser`:$cloneToken"
     $cloneB64 = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($clonePair))
+    if ($env:GITHUB_ACTIONS -eq "true") {
+      Write-Host "::add-mask::$cloneToken"
+      Write-Host "::add-mask::$cloneB64"
+    }
     # GIT_CONFIG_* env vars keep the credential out of the process argument
     # list and also authenticate the later "git fetch" for release commits.
     $env:GIT_CONFIG_COUNT = "1"

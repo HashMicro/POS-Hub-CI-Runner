@@ -5,6 +5,7 @@
 #   2. Tambahkan Repository Secrets di GitHub (Settings -> Secrets and variables -> Actions):
 #      - POSHUB_GIT_CLONE_USERNAME : Username token GitLab (contoh: oauth2)
 #      - POSHUB_GIT_CLONE_TOKEN    : Personal Access Token / Deploy Token untuk clone repo git.hashmicro.com
+#      - POSHUB_CI_SECRET          : Kunci enkripsi AES-256 antara POS Hub & GitHub Actions (otomatis disinkronkan oleh POS Hub)
 #   3. Trigger bisa dilakukan via:
 #      - Tombol Build di POS Hub Dashboard (menggunakan GitHub REST API `workflow_dispatch`)
 #      - Tombol "Run workflow" langsung di tab Actions GitHub (tanpa perlu update code)
@@ -39,7 +40,7 @@ on:
           - capacitor
       repo_url:
         description: "Git Repository URL Aplikasi"
-        required: true
+        required: false
         default: "https://git.hashmicro.com/hashmicro1/hmx/hmx-super-apps"
         type: string
       branch:
@@ -68,7 +69,7 @@ on:
         default: ""
         type: string
       payload_b64:
-        description: "Base64 JSON berisi konfigurasi client dari POS Hub (POSHUB_* env vars)"
+        description: "Encrypted (enc:v1:...) atau Base64 JSON konfigurasi client dari POS Hub"
         required: false
         default: ""
         type: string
@@ -84,6 +85,7 @@ jobs:
     env:
       POSHUB_GIT_CLONE_USERNAME: ${{ secrets.POSHUB_GIT_CLONE_USERNAME || 'oauth2' }}
       POSHUB_GIT_CLONE_TOKEN: ${{ secrets.POSHUB_GIT_CLONE_TOKEN }}
+      POSHUB_CI_SECRET: ${{ secrets.POSHUB_CI_SECRET }}
       CL: /D_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS
       GRADLE_OPTS: -Dorg.gradle.daemon=false
 
@@ -169,18 +171,55 @@ jobs:
           if (![string]::IsNullOrWhiteSpace($env:DISPATCH_PAYLOAD_JSON) -and $env:DISPATCH_PAYLOAD_JSON -ne "null") {
             $dispatchObj = $env:DISPATCH_PAYLOAD_JSON | ConvertFrom-Json
             foreach ($prop in $dispatchObj.PSObject.Properties) {
-              $isSecret = $prop.Name -match "TOKEN|SECRET|PASSWORD"
+              $isSecret = $prop.Name -match "TOKEN|SECRET|PASSWORD|KEY"
               Set-EnvVar $prop.Name ([string]$prop.Value) $isSecret
             }
           }
 
-          # 3. Override / enrich from payload_b64 (sent by POS Hub backend via workflow_dispatch)
+          # 3. Override / enrich from payload_b64 (encrypted enc:v1:... or Base64 JSON sent by POS Hub backend)
           if (![string]::IsNullOrWhiteSpace($env:INPUT_PAYLOAD_B64)) {
-            $jsonBytes = [Convert]::FromBase64String($env:INPUT_PAYLOAD_B64.Trim())
-            $jsonText = [System.Text.Encoding]::UTF8.GetString($jsonBytes)
+            $rawInput = $env:INPUT_PAYLOAD_B64.Trim()
+            $jsonText = ""
+            if ($rawInput.StartsWith("enc:v1:")) {
+              if ([string]::IsNullOrWhiteSpace($env:POSHUB_CI_SECRET)) {
+                throw "POSHUB_CI_SECRET repository secret is required to decrypt enc:v1: payload from POS Hub"
+              }
+              $b64Cipher = $rawInput.Substring(7)
+              $combinedBytes = [Convert]::FromBase64String($b64Cipher)
+              if ($combinedBytes.Length -lt 32 -or ($combinedBytes.Length % 16) -ne 0) {
+                throw "Invalid encrypted payload length"
+              }
+              $iv = $combinedBytes[0..15]
+              $cipherBytes = $combinedBytes[16..($combinedBytes.Length - 1)]
+              $sha256 = [System.Security.Cryptography.SHA256]::Create()
+              try {
+                $keyBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($env:POSHUB_CI_SECRET.Trim()))
+              } finally {
+                $sha256.Dispose()
+              }
+              $aes = [System.Security.Cryptography.Aes]::Create()
+              try {
+                $aes.Key = $keyBytes
+                $aes.IV = $iv
+                $aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+                $aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+                $decryptor = $aes.CreateDecryptor()
+                try {
+                  $plainBytes = $decryptor.TransformFinalBlock($cipherBytes, 0, $cipherBytes.Length)
+                  $jsonText = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+                } finally {
+                  $decryptor.Dispose()
+                }
+              } finally {
+                $aes.Dispose()
+              }
+            } else {
+              $jsonBytes = [Convert]::FromBase64String($rawInput)
+              $jsonText = [System.Text.Encoding]::UTF8.GetString($jsonBytes)
+            }
             $payloadObj = $jsonText | ConvertFrom-Json
             foreach ($prop in $payloadObj.PSObject.Properties) {
-              $isSecret = $prop.Name -match "TOKEN|SECRET|PASSWORD"
+              $isSecret = $prop.Name -match "TOKEN|SECRET|PASSWORD|KEY"
               Set-EnvVar $prop.Name ([string]$prop.Value) $isSecret
             }
           }
